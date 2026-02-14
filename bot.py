@@ -364,6 +364,15 @@ async def main():
     """Start the bot (polling for local dev, webhook for Railway)."""
     logger.info("Bot starting…")
 
+    # Show Railway IP in logs
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.ipify.org") as r:
+                ip = await r.text()
+                logger.info(f"=== SERVER IP: {ip} ===")
+    except Exception:
+        pass
+
     if WEBHOOK_URL:
         # ── Webhook mode (Railway / production) ──
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
