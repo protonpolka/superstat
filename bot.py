@@ -71,6 +71,7 @@ IMAGE_URLS_BS = [
 
 class PlayerForm(StatesGroup):
     waiting_for_tag = State()
+    waiting_for_type = State()
     waiting_for_description = State()
 
 
@@ -256,6 +257,16 @@ def game_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔥 Олякс", callback_data="type_олякс"),
+            InlineKeyboardButton(text="🧠 Псих", callback_data="type_псих"),
+            InlineKeyboardButton(text="💎 Тони", callback_data="type_тони"),
+        ],
+    ])
+
+
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
@@ -331,7 +342,7 @@ async def process_tag(message: types.Message, state: FSMContext):
             img_bytes = generate_bs_fallback(player_data)
 
     await state.update_data(player_data=player_data, img_bytes=img_bytes, tag=raw)
-    await state.set_state(PlayerForm.waiting_for_description)
+    await state.set_state(PlayerForm.waiting_for_type)
 
     name = player_data.get("name", "?")
     trophies = player_data.get("trophies", 0)
@@ -345,9 +356,23 @@ async def process_tag(message: types.Message, state: FSMContext):
 
     await wait_msg.edit_text(
         f"✅ {game['emoji']} *{name}* — {trophies:,} 🏆{extra}\n\n"
-        f"📝 Напишите описание:\n_(или /cancel)_",
+        f"Выберите тип:",
+        parse_mode="Markdown",
+        reply_markup=type_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("type_"))
+async def on_type_selected(cb: types.CallbackQuery, state: FSMContext):
+    chosen_type = cb.data.replace("type_", "")
+    await state.update_data(chosen_type=chosen_type)
+    await state.set_state(PlayerForm.waiting_for_description)
+    await cb.message.edit_text(
+        f"✅ Тип: *{chosen_type}*\n\n"
+        f"📝 Теперь напишите описание:\n_(или /cancel)_",
         parse_mode="Markdown",
     )
+    await cb.answer()
 
 
 @dp.message(PlayerForm.waiting_for_description)
@@ -360,14 +385,13 @@ async def process_description(message: types.Message, state: FSMContext):
     img_bytes = data.get("img_bytes")
     tag = data.get("tag")
     game_id = data.get("game_id", "bs")
+    chosen_type = data.get("chosen_type", "—")
     username = get_username(message)
     game = GAMES[game_id]
 
     if not player_data:
         await message.answer("⚠️ Ошибка. /start")
         return
-
-    footer = f"\n\n📝 {description}\n👤 Отправил: {username}"
 
     if game_id == "bs":
         # ── Brawl Stars: фото + подпись ──
@@ -379,8 +403,10 @@ async def process_description(message: types.Message, state: FSMContext):
             f"🌟 *BRAWL STARS*\n"
             f"📊 *{name}* ({tag})\n"
             f"🏆 Трофеи: {trophies:,}\n"
-            f"🎮 Бравлеров: {brawlers}"
-            f"{footer}"
+            f"🎮 Бравлеров: {brawlers}\n\n"
+            f"🏷 Тип: {chosen_type}\n"
+            f"📝 {description}\n"
+            f"👤 Отправил: {username}"
         )
 
         photo = BufferedInputFile(img_bytes, filename=f"bs_{tag.replace('#','')}.png")
@@ -397,7 +423,7 @@ async def process_description(message: types.Message, state: FSMContext):
 
     elif game_id == "cr":
         # ── Clash Royale: текст ──
-        footer = f"\n\n📝 {escape_html(description)}\n👤 Отправил: {escape_html(username)}"
+        footer = f"\n\n🏷 Тип: {escape_html(chosen_type)}\n📝 {escape_html(description)}\n👤 Отправил: {escape_html(username)}"
         text = format_cr_text(player_data) + footer
         await message.answer(text, parse_mode="HTML")
 
@@ -411,7 +437,7 @@ async def process_description(message: types.Message, state: FSMContext):
 
     elif game_id == "coc":
         # ── Clash of Clans: текст ──
-        footer = f"\n\n📝 {escape_html(description)}\n👤 Отправил: {escape_html(username)}"
+        footer = f"\n\n🏷 Тип: {escape_html(chosen_type)}\n📝 {escape_html(description)}\n👤 Отправил: {escape_html(username)}"
         text = format_coc_text(player_data) + footer
         await message.answer(text, parse_mode="HTML")
 
