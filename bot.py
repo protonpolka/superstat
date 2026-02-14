@@ -1,7 +1,6 @@
 """
 Telegram Bot for Brawl Stars Player Statistics
-Fetches player stats image from brawlbot.xyz (same style as sltbot.com)
-and posts it to a Telegram channel.
+Tries multiple image APIs (sltbot, brawlbot, brawltracker) to get sltbot-style card.
 """
 
 import os
@@ -17,7 +16,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BRAWL_STARS_API_KEY = os.getenv("BRAWL_STARS_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
@@ -27,21 +25,26 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 if not TELEGRAM_TOKEN or not BRAWL_STARS_API_KEY:
     raise RuntimeError("TELEGRAM_TOKEN and BRAWL_STARS_API_KEY must be set in .env")
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── Bot / Dispatcher ─────────────────────────────────────────────────────────
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# ── API bases ─────────────────────────────────────────────────────────────────
 BS_API_BASE = "https://bsproxy.royaleapi.dev/v1"
-BRAWLBOT_IMAGE_BASE = "https://brawlbot.xyz/api/image/rank"
+
+# Multiple image endpoints to try (sltbot-style cards)
+IMAGE_URLS = [
+    "https://sltbot.com/api/image/{tag}",
+    "https://sltbot.com/api/player/{tag}/image",
+    "https://sltbot.com/api/rank/{tag}",
+    "https://brawltracker.com/api/image/rank/{tag}",
+    "https://brawlbot.xyz/api/image/rank/{tag}",
+    "https://brawlbot.xyz/api/player/{tag}/image",
+]
 
 
 async def fetch_player(tag: str) -> dict:
-    """Fetch player data from the Brawl Stars API."""
     encoded_tag = urllib.parse.quote(tag)
     url = f"{BS_API_BASE}/players/{encoded_tag}"
     headers = {"Authorization": f"Bearer {BRAWL_STARS_API_KEY}"}
@@ -64,28 +67,43 @@ async def fetch_player(tag: str) -> dict:
 
 
 async def fetch_stats_image(tag: str) -> bytes | None:
-    """Fetch the ready-made stats image from brawlbot.xyz (sltbot-style)."""
+    """Try multiple image API endpoints to get sltbot-style card."""
     clean_tag = tag.lstrip("#")
-    url = f"{BRAWLBOT_IMAGE_BASE}/{clean_tag}"
-    logger.info(f"Fetching image: {url}")
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            logger.info(f"Image: {url} -> {resp.status}, type={resp.headers.get('Content-Type','?')}")
-            if resp.status == 200:
-                data = await resp.read()
-                ct = resp.headers.get("Content-Type", "")
-                if "image" in ct or data[:4] == b'\x89PNG' or data[:2] == b'\xff\xd8':
-                    logger.info(f"Image OK: {len(data)} bytes")
-                    return data
-                logger.warning(f"Not an image: {ct}")
-            else:
-                logger.warning(f"Image fetch failed: {resp.status}")
+        for url_template in IMAGE_URLS:
+            url = url_template.format(tag=clean_tag)
+            try:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    allow_redirects=True,
+                ) as resp:
+                    ct = resp.headers.get("Content-Type", "")
+                    logger.info(f"TRY {url} -> {resp.status} type={ct}")
+
+                    if resp.status == 200:
+                        data = await resp.read()
+                        # Check if response is actually an image
+                        if ("image" in ct
+                            or data[:4] == b'\x89PNG'
+                            or data[:2] == b'\xff\xd8'
+                            or data[:4] == b'RIFF'):
+                            logger.info(f"SUCCESS: {url} -> {len(data)} bytes")
+                            return data
+                        else:
+                            # Log first 200 bytes to understand what we got
+                            logger.info(f"NOT IMAGE: {url} -> first 200 bytes: {data[:200]}")
+                    else:
+                        body = await resp.read()
+                        logger.info(f"FAIL {url} -> {resp.status}, body: {body[:200]}")
+            except Exception as e:
+                logger.warning(f"ERROR {url}: {e}")
+
     return None
 
 
 def generate_fallback_image(data: dict) -> bytes:
-    """Simple fallback card if brawlbot.xyz is unavailable."""
     from PIL import Image, ImageDraw, ImageFont
     from io import BytesIO
 
@@ -100,17 +118,12 @@ def generate_fallback_image(data: dict) -> bytes:
             return ImageFont.truetype(p, size)
         return ImageFont.load_default()
 
-    name = data.get("name", "Unknown")
-    tag = data.get("tag", "")
-    trophies = data.get("trophies", 0)
-    highest = data.get("highestTrophies", 0)
-
     draw.rectangle([(0, 0), (W, 5)], fill=(250, 200, 60))
-    draw.text((40, 25), name, fill="white", font=font(36, True))
-    draw.text((40, 70), tag, fill=(160, 160, 180), font=font(18))
+    draw.text((40, 25), data.get("name", "?"), fill="white", font=font(36, True))
+    draw.text((40, 70), data.get("tag", ""), fill=(160, 160, 180), font=font(18))
     y = 110
     for line in [
-        f"Trophies: {trophies:,} / {highest:,}",
+        f"Trophies: {data.get('trophies',0):,} / {data.get('highestTrophies',0):,}",
         f"3v3: {data.get('3vs3Victories',0):,}  Solo: {data.get('soloVictories',0):,}  Duo: {data.get('duoVictories',0):,}",
         f"Brawlers: {len(data.get('brawlers',[]))}",
     ]:
@@ -122,25 +135,18 @@ def generate_fallback_image(data: dict) -> bytes:
     return buf.getvalue()
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 *Привет!* Я бот статистики Brawl Stars.\n\n"
-        "Отправь мне тег игрока в формате `#XXXXXXXX`\n"
-        "и я пришлю карточку со статистикой как на sltbot!\n\n"
-        "Пример: `#2GPQY9RJL`",
+        "Отправь тег игрока: `#2GPQY9RJL`",
         parse_mode="Markdown",
     )
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 *Как пользоваться:*\n\n"
-        "1. Найдите тег в Brawl Stars (профиль → тег)\n"
-        "2. Отправьте его мне: `#2GPQY9RJL`\n"
-        "3. Получите карточку статистики!",
+        "Отправьте тег игрока (например `#2GPQY9RJL`) и получите карточку статистики.",
         parse_mode="Markdown",
     )
 
@@ -153,15 +159,11 @@ async def handle_tag(message: types.Message):
         raw = "#" + raw
 
     if not TAG_PATTERN.match(raw):
-        await message.answer(
-            "❌ Неверный формат тега.\nПример: `#2GPQY9RJL`",
-            parse_mode="Markdown",
-        )
+        await message.answer("❌ Неверный тег. Пример: `#2GPQY9RJL`", parse_mode="Markdown")
         return
 
     wait_msg = await message.answer("⏳ Загружаю статистику…")
 
-    # 1) Fetch player data
     try:
         data = await fetch_player(raw)
     except ValueError as e:
@@ -175,16 +177,15 @@ async def handle_tag(message: types.Message):
         await wait_msg.edit_text(f"⚠️ Ошибка API: {e}")
         return
 
-    # 2) Get image from brawlbot.xyz (sltbot-style)
+    # Try to get sltbot-style image
     img_bytes = None
     try:
         img_bytes = await fetch_stats_image(raw)
     except Exception as e:
         logger.warning(f"Image fetch error: {e}")
 
-    # 3) Fallback
     if not img_bytes:
-        logger.info("Fallback image")
+        logger.info("All image APIs failed, using fallback")
         img_bytes = generate_fallback_image(data)
 
     player_name = data.get("name", "Unknown")
@@ -198,18 +199,15 @@ async def handle_tag(message: types.Message):
     await message.answer_photo(photo=photo, caption=caption, parse_mode="Markdown")
     await wait_msg.delete()
 
-    # Send to channel
     if CHANNEL_ID:
         try:
-            ch_photo = BufferedInputFile(img_bytes, filename=f"stats_{raw.replace('#','')}.png")
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=ch_photo, caption=caption, parse_mode="Markdown")
+            ch = BufferedInputFile(img_bytes, filename=f"stats_{raw.replace('#','')}.png")
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=ch, caption=caption, parse_mode="Markdown")
             await message.answer("✅ Отправлено в канал!")
         except Exception as e:
-            logger.warning(f"Channel send failed: {e}")
+            logger.warning(f"Channel: {e}")
             await message.answer("⚠️ Не удалось отправить в канал.")
 
-
-# ── Entry point ──────────────────────────────────────────────────────────────
 
 async def main():
     logger.info("Bot starting…")
@@ -227,14 +225,12 @@ async def main():
 
         webhook_path = f"/webhook/{TELEGRAM_TOKEN}"
         full_url = WEBHOOK_URL.rstrip("/") + webhook_path
-
         await bot.set_webhook(full_url)
         logger.info(f"Webhook: {full_url}")
 
         app = web.Application()
         async def health(_): return web.Response(text="OK")
         app.router.add_get("/", health)
-
         SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
 
         runner = web.AppRunner(app)
