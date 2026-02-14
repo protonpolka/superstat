@@ -152,8 +152,12 @@ def generate_bs_fallback(data: dict) -> bytes:
     return buf.getvalue()
 
 
+def escape_html(text) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def format_cr_text(data: dict) -> str:
-    name = data.get("name", "?")
+    name = escape_html(data.get("name", "?"))
     tag = data.get("tag", "")
     trophies = data.get("trophies", 0)
     best = data.get("bestTrophies", 0)
@@ -162,14 +166,14 @@ def format_cr_text(data: dict) -> str:
     losses = data.get("losses", 0)
     three_crowns = data.get("threeCrownWins", 0)
     cards = len(data.get("cards", []))
-    clan = data.get("clan", {}).get("name", "—")
-    arena = data.get("arena", {}).get("name", "—")
+    clan = escape_html(data.get("clan", {}).get("name", "—"))
+    arena = escape_html(data.get("arena", {}).get("name", "—"))
     donations = data.get("totalDonations", 0)
     challenge_max = data.get("challengeMaxWins", 0)
 
     return (
-        f"👑 *CLASH ROYALE*\n\n"
-        f"👤 *{name}* ({tag})\n"
+        f"👑 <b>CLASH ROYALE</b>\n\n"
+        f"👤 <b>{name}</b> ({tag})\n"
         f"🏠 Клан: {clan}\n"
         f"🏟 Арена: {arena}\n\n"
         f"🏆 Трофеи: {trophies:,}\n"
@@ -185,7 +189,7 @@ def format_cr_text(data: dict) -> str:
 
 
 def format_coc_text(data: dict) -> str:
-    name = data.get("name", "?")
+    name = escape_html(data.get("name", "?"))
     tag = data.get("tag", "")
     trophies = data.get("trophies", 0)
     best = data.get("bestTrophies", 0)
@@ -198,22 +202,22 @@ def format_coc_text(data: dict) -> str:
     defense_wins = data.get("defenseWins", 0)
     donations = data.get("donations", 0)
     received = data.get("donationsReceived", 0)
-    clan = data.get("clan", {}).get("name", "—")
-    role = data.get("role", "—")
-    league = data.get("league", {}).get("name", "—")
+    clan = escape_html(data.get("clan", {}).get("name", "—"))
+    role = escape_html(data.get("role", "—"))
+    league = escape_html(data.get("league", {}).get("name", "—"))
     heroes = data.get("heroes", [])
 
     th_text = f"{th}" + (f" (оружие {th_weapon})" if th_weapon else "")
 
     hero_lines = ""
     if heroes:
-        hero_lines = "\n🦸 *Герои:*\n"
+        hero_lines = "\n🦸 <b>Герои:</b>\n"
         for h in heroes:
-            hero_lines += f"  • {h.get('name','?')}: Lv.{h.get('level',0)}/{h.get('maxLevel',0)}\n"
+            hero_lines += f"  • {escape_html(h.get('name','?'))}: Lv.{h.get('level',0)}/{h.get('maxLevel',0)}\n"
 
     return (
-        f"⚔️ *CLASH OF CLANS*\n\n"
-        f"👤 *{name}* ({tag})\n"
+        f"⚔️ <b>CLASH OF CLANS</b>\n\n"
+        f"👤 <b>{name}</b> ({tag})\n"
         f"🏠 Клан: {clan} ({role})\n"
         f"🏅 Лига: {league}\n\n"
         f"🏠 Ратуша: {th_text}\n"
@@ -393,12 +397,13 @@ async def process_description(message: types.Message, state: FSMContext):
 
     elif game_id == "cr":
         # ── Clash Royale: текст ──
+        footer = f"\n\n📝 {escape_html(description)}\n👤 Отправил: {escape_html(username)}"
         text = format_cr_text(player_data) + footer
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer(text, parse_mode="HTML")
 
         if CHANNEL_ID:
             try:
-                await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="Markdown")
+                await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML")
                 await message.answer("✅ Отправлено в канал!")
             except Exception as e:
                 logger.warning(f"Channel: {e}")
@@ -406,12 +411,13 @@ async def process_description(message: types.Message, state: FSMContext):
 
     elif game_id == "coc":
         # ── Clash of Clans: текст ──
+        footer = f"\n\n📝 {escape_html(description)}\n👤 Отправил: {escape_html(username)}"
         text = format_coc_text(player_data) + footer
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer(text, parse_mode="HTML")
 
         if CHANNEL_ID:
             try:
-                await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="Markdown")
+                await bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="HTML")
                 await message.answer("✅ Отправлено в канал!")
             except Exception as e:
                 logger.warning(f"Channel: {e}")
