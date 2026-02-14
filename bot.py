@@ -1,6 +1,7 @@
 """
 Telegram Bot for Brawl Stars Player Statistics
-Tries multiple image APIs (sltbot, brawlbot, brawltracker) to get sltbot-style card.
+After user sends a tag, bot asks for a description,
+then posts the stats card + description + username to a channel.
 """
 
 import os
@@ -12,6 +13,9 @@ import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,11 +33,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 BS_API_BASE = "https://bsproxy.royaleapi.dev/v1"
 
-# Multiple image endpoints to try (sltbot-style cards)
 IMAGE_URLS = [
     "https://sltbot.com/api/image/{tag}",
     "https://sltbot.com/api/player/{tag}/image",
@@ -43,6 +47,15 @@ IMAGE_URLS = [
     "https://brawlbot.xyz/api/player/{tag}/image",
 ]
 
+
+# ── FSM States ────────────────────────────────────────────────────────────────
+
+class PlayerForm(StatesGroup):
+    waiting_for_tag = State()
+    waiting_for_description = State()
+
+
+# ── API helpers ───────────────────────────────────────────────────────────────
 
 async def fetch_player(tag: str) -> dict:
     encoded_tag = urllib.parse.quote(tag)
@@ -67,7 +80,6 @@ async def fetch_player(tag: str) -> dict:
 
 
 async def fetch_stats_image(tag: str) -> bytes | None:
-    """Try multiple image API endpoints to get sltbot-style card."""
     clean_tag = tag.lstrip("#")
 
     async with aiohttp.ClientSession() as session:
@@ -84,7 +96,6 @@ async def fetch_stats_image(tag: str) -> bytes | None:
 
                     if resp.status == 200:
                         data = await resp.read()
-                        # Check if response is actually an image
                         if ("image" in ct
                             or data[:4] == b'\x89PNG'
                             or data[:2] == b'\xff\xd8'
@@ -92,14 +103,12 @@ async def fetch_stats_image(tag: str) -> bytes | None:
                             logger.info(f"SUCCESS: {url} -> {len(data)} bytes")
                             return data
                         else:
-                            # Log first 200 bytes to understand what we got
-                            logger.info(f"NOT IMAGE: {url} -> first 200 bytes: {data[:200]}")
+                            logger.info(f"NOT IMAGE: {url} -> first 200: {data[:200]}")
                     else:
                         body = await resp.read()
                         logger.info(f"FAIL {url} -> {resp.status}, body: {body[:200]}")
             except Exception as e:
                 logger.warning(f"ERROR {url}: {e}")
-
     return None
 
 
@@ -135,25 +144,93 @@ def generate_fallback_image(data: dict) -> bytes:
     return buf.getvalue()
 
 
+def get_username(message: types.Message) -> str:
+    """Get display name for the user."""
+    user = message.from_user
+    if user.username:
+        return f"@{user.username}"
+    name = user.first_name or ""
+    if user.last_name:
+        name += f" {user.last_name}"
+    return name or f"id:{user.id}"
+
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
     await message.answer(
         "👋 *Привет!* Я бот статистики Brawl Stars.\n\n"
-        "Отправь тег игрока: `#2GPQY9RJL`",
+        "Отправь тег игрока в формате `#XXXXXXXX`",
         parse_mode="Markdown",
     )
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "Отправьте тег игрока (например `#2GPQY9RJL`) и получите карточку статистики.",
+        "📖 *Как пользоваться:*\n\n"
+        "1. Отправьте тег игрока: `#2GPQY9RJL`\n"
+        "2. Бот попросит описание\n"
+        "3. Карточка будет отправлена в канал!",
         parse_mode="Markdown",
     )
 
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Отменено. Отправьте новый тег когда будете готовы.")
+
+
 TAG_PATTERN = re.compile(r"^#?[0289PYLQGRJCUV]{3,15}$", re.IGNORECASE)
 
+
+@dp.message(PlayerForm.waiting_for_description)
+async def process_description(message: types.Message, state: FSMContext):
+    """User sent a description — now generate and send everything."""
+    description = message.text.strip()
+    data = await state.get_data()
+    await state.clear()
+
+    player_data = data.get("player_data")
+    img_bytes = data.get("img_bytes")
+    tag = data.get("tag")
+    username = get_username(message)
+
+    if not player_data or not img_bytes:
+        await message.answer("⚠️ Ошибка. Попробуйте снова — отправьте тег.")
+        return
+
+    player_name = player_data.get("name", "Unknown")
+    trophies = player_data.get("trophies", 0)
+    brawlers_count = len(player_data.get("brawlers", []))
+
+    caption = (
+        f"📊 *{player_name}* ({tag})\n"
+        f"🏆 Трофеи: {trophies:,}\n"
+        f"🎮 Бравлеров: {brawlers_count}\n\n"
+        f"📝 {description}\n\n"
+        f"👤 Отправил: {username}"
+    )
+
+    # Send to user
+    photo = BufferedInputFile(img_bytes, filename=f"stats_{tag.replace('#','')}.png")
+    await message.answer_photo(photo=photo, caption=caption, parse_mode="Markdown")
+
+    # Send to channel
+    if CHANNEL_ID:
+        try:
+            ch = BufferedInputFile(img_bytes, filename=f"stats_{tag.replace('#','')}.png")
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=ch, caption=caption, parse_mode="Markdown")
+            await message.answer("✅ Отправлено в канал!")
+        except Exception as e:
+            logger.warning(f"Channel: {e}")
+            await message.answer("⚠️ Не удалось отправить в канал.")
+
+
 @dp.message(F.text)
-async def handle_tag(message: types.Message):
+async def handle_tag(message: types.Message, state: FSMContext):
+    """User sends a tag — fetch data, then ask for description."""
     raw = message.text.strip().upper()
     if not raw.startswith("#"):
         raw = "#" + raw
@@ -164,8 +241,9 @@ async def handle_tag(message: types.Message):
 
     wait_msg = await message.answer("⏳ Загружаю статистику…")
 
+    # Fetch player data
     try:
-        data = await fetch_player(raw)
+        player_data = await fetch_player(raw)
     except ValueError as e:
         await wait_msg.edit_text(f"❌ {e}")
         return
@@ -177,37 +255,36 @@ async def handle_tag(message: types.Message):
         await wait_msg.edit_text(f"⚠️ Ошибка API: {e}")
         return
 
-    # Try to get sltbot-style image
+    # Fetch image
     img_bytes = None
     try:
         img_bytes = await fetch_stats_image(raw)
     except Exception as e:
-        logger.warning(f"Image fetch error: {e}")
+        logger.warning(f"Image error: {e}")
 
     if not img_bytes:
-        logger.info("All image APIs failed, using fallback")
-        img_bytes = generate_fallback_image(data)
+        img_bytes = generate_fallback_image(player_data)
 
-    player_name = data.get("name", "Unknown")
-    caption = (
-        f"📊 *{player_name}* ({raw})\n"
-        f"🏆 Трофеи: {data.get('trophies', 0):,}\n"
-        f"🎮 Бравлеров: {len(data.get('brawlers', []))}"
+    # Save to FSM state and ask for description
+    await state.update_data(
+        player_data=player_data,
+        img_bytes=img_bytes,
+        tag=raw,
+    )
+    await state.set_state(PlayerForm.waiting_for_description)
+
+    player_name = player_data.get("name", "Unknown")
+    trophies = player_data.get("trophies", 0)
+
+    await wait_msg.edit_text(
+        f"✅ Найден: *{player_name}* — {trophies:,} 🏆\n\n"
+        f"📝 Теперь напишите почту:пароль к аккаунту:\n"
+        f"_(или /cancel для отмены)_",
+        parse_mode="Markdown",
     )
 
-    photo = BufferedInputFile(img_bytes, filename=f"stats_{raw.replace('#','')}.png")
-    await message.answer_photo(photo=photo, caption=caption, parse_mode="Markdown")
-    await wait_msg.delete()
 
-    if CHANNEL_ID:
-        try:
-            ch = BufferedInputFile(img_bytes, filename=f"stats_{raw.replace('#','')}.png")
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=ch, caption=caption, parse_mode="Markdown")
-            await message.answer("✅ Отправлено в канал!")
-        except Exception as e:
-            logger.warning(f"Channel: {e}")
-            await message.answer("⚠️ Не удалось отправить в канал.")
-
+# ── Entry point ──────────────────────────────────────────────────────────────
 
 async def main():
     logger.info("Bot starting…")
