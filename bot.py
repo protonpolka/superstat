@@ -37,7 +37,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 # ── Brawl Stars API helpers ──────────────────────────────────────────────────
-BS_API_BASE = "https://api.brawlstars.com/v1"
+BS_API_BASE = "https://bsproxy.royaleapi.dev/v1"
 
 BRAWLER_COLORS = {
     "Trophy Road": "#f5c542",
@@ -74,14 +74,18 @@ async def fetch_player(tag: str) -> dict:
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
+            logger.info(f"API request: {url} -> status {resp.status}")
             if resp.status == 200:
                 return await resp.json()
             elif resp.status == 404:
                 raise ValueError("Игрок не найден. Проверьте тег.")
             elif resp.status == 403:
+                text = await resp.text()
+                logger.error(f"403 Forbidden: {text}")
                 raise PermissionError("Ошибка авторизации API. Проверьте ключ и IP.")
             else:
                 text = await resp.text()
+                logger.error(f"API error {resp.status}: {text}")
                 raise ConnectionError(f"Ошибка API ({resp.status}): {text[:200]}")
 
 
