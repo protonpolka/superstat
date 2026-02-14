@@ -376,6 +376,12 @@ async def main():
         logger.info(f"Webhook set: {full_webhook_url}")
 
         app = web.Application()
+
+        # Health check endpoint for Railway
+        async def health(_request):
+            return web.Response(text="OK", status=200)
+        app.router.add_get("/", health)
+
         handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         handler.register(app, path=webhook_path)
 
